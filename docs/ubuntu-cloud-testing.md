@@ -56,17 +56,37 @@ If you use a private fork, use your clone URL and ensure the VM has SSH keys or 
 
 ## 4. R packages
 
-Start R as your normal user (not root):
+On Ubuntu, the system site-library (`/usr/local/lib/R/site-library`) is often **not writable** for user `ubuntu`. Install into your home directory instead.
 
 ```bash
-R -q -e 'install.packages(c("MASS","e1071","rpart","caret","glmnet","ggplot2","knitr","rmarkdown"), repos="https://cloud.r-project.org")'
+mkdir -p "$HOME/R/library"
+export R_LIBS_USER="$HOME/R/library"
+grep -q '^R_LIBS_USER=' "$HOME/.Renviron" 2>/dev/null || \
+  echo "R_LIBS_USER=$HOME/R/library" >> "$HOME/.Renviron"
+```
+
+Then install (as your normal user, not `sudo`):
+
+```bash
+R -q -e 'install.packages(
+  c("MASS","e1071","rpart","caret","glmnet","ggplot2","knitr","rmarkdown"),
+  lib = Sys.getenv("R_LIBS_USER"),
+  repos = "https://cloud.r-project.org"
+)'
 ```
 
 `glmnet` and `caret` may take a few minutes to compile on first install.
 
+**Alternative (system-wide):** only if you prefer packages for all users:
+
+```bash
+sudo R -q -e 'install.packages(c("MASS","e1071","rpart","caret","glmnet","ggplot2","knitr","rmarkdown"), repos="https://cloud.r-project.org")'
+```
+
 **One-line check** that required packages load:
 
 ```bash
+export R_LIBS_USER="$HOME/R/library"
 R -q -e 'lapply(c("MASS","e1071","rpart","caret","glmnet","ggplot2"), require, character.only=TRUE)'
 ```
 
@@ -117,6 +137,7 @@ R -q -e 'setwd("'"$(pwd)"'"); rmarkdown::render("Assignment_Tasks1_2.Rmd", outpu
 | Symptom | Likely cause | Fix |
 |---------|----------------|-----|
 | `cannot open file 'my_dataQ1.csv'` | Wrong working directory | `cd` to repo root; in R use `setwd()` to that path |
+| `lib ... is not writable` / `unable to install packages` | System R library is root-only | Use section 4 user library (`R_LIBS_USER`) or `sudo R` |
 | `Install packages: glmnet` | Missing dev libraries | Re-run `apt-get install` lines in section 2, then reinstall `glmnet` |
 | LDA / matrix errors in knit | Corrupt or wrong CSV | Confirm dimensions with `Rscript validate_run.R` |
 | Pandoc not found | `pandoc` not installed | `sudo apt-get install pandoc` |
