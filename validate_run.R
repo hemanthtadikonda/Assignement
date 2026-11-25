@@ -1,4 +1,4 @@
-# Cross-check: source all assignment logic (no knit). Run from Assign folder:
+# Cross-check: data, splits, and model fits (no knit). From repository root:
 #   Rscript validate_run.R
 
 options(warn = 1)

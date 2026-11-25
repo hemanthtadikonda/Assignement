@@ -1,0 +1,23 @@
+# R session and workspace
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
+
+# Knit / build outputs (regenerate locally)
+Assignment_Tasks1_2.docx
+Assignment_Tasks1_2.pdf
+Assignment_Tasks1_2.html
+*_cache/
+*_files/
+
+# OS and editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Accidental browser/download duplicates
+* (1).*
+* (2).*
