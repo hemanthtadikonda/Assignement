@@ -1,0 +1,384 @@
+---
+title: "Statistical Learning Assignment — Classification and Regression"
+author: "Your Name"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  word_document:
+    toc: true
+    toc_depth: 3
+    fig_caption: yes
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    fig_caption: yes
+    latex_engine: pdflatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 6.5,
+  fig.height = 4.5,
+  dpi = 120
+)
+```
+
+# Introduction
+
+This report completes **Task 1** (classification with high-dimensional predictors) and **Task 2** (regression with variable selection and penalised models). All random splits use **`set.seed(20261)`** as required. Performance is reported on the **training** and **test** sets separately, followed by a short model comparison and recommendation.
+
+**Software:** R (recommended: R $\geq$ 4.2). **Packages** (install once if needed):
+
+```{r packages, eval=FALSE}
+pkgs <- c("MASS", "e1071", "rpart", "caret", "glmnet", "ggplot2", "knitr", "kableExtra")
+install.packages(setdiff(pkgs, rownames(installed.packages())))
+```
+
+```{r load-packages}
+required <- c("MASS", "e1071", "rpart", "caret", "glmnet", "ggplot2", "knitr", "rmarkdown")
+missing <- setdiff(required, rownames(installed.packages()))
+if (length(missing) > 0) {
+  stop(
+    "Please install missing packages: ",
+    paste(missing, collapse = ", "),
+  call. = FALSE)
+}
+suppressPackageStartupMessages({
+  library(MASS)
+  library(e1071)
+  library(rpart)
+  library(caret)
+  library(glmnet)
+  library(ggplot2)
+  library(knitr)
+})
+```
+
+---
+
+# Task 1 — Classification (`my_dataQ1.csv`)
+
+## Data description and train–test split
+
+The data contain **100 observations**, **500 predictor variables** (`X1`–`X500`), and a **group label** in the first column (`Y`). Labels are binary (`0` / `1`).
+
+```{r task1-load}
+data_q1 <- read.csv("my_dataQ1.csv", check.names = FALSE)
+data_q1$Y <- factor(data_q1$Y, levels = c(0, 1), labels = c("Class0", "Class1"))
+
+n_q1 <- nrow(data_q1)
+stopifnot(n_q1 == 100L, ncol(data_q1) == 501L)
+
+set.seed(20261)
+idx_train_q1 <- sample(seq_len(n_q1), size = 70L, replace = FALSE)
+idx_test_q1  <- setdiff(seq_len(n_q1), idx_train_q1)
+
+train_q1 <- data_q1[idx_train_q1, ]
+test_q1  <- data_q1[idx_test_q1, ]
+
+pred_cols_q1 <- setdiff(names(data_q1), "Y")
+
+cat("Training cases:", nrow(train_q1), "| Test cases:", nrow(test_q1), "\n")
+cat("Class balance (train):\n")
+print(table(train_q1$Y))
+```
+
+**Note (high dimensionality):** with $p = 500$ and $n_{\text{train}} = 70$, the within-class covariance matrix in classical linear discriminant analysis (LDA) is **rank-deficient**. Following standard practice for **Bayesian / linear discriminant analysis** in $p > n$ settings, predictors are **centred and scaled** on the training set, then **principal components** are retained ($K = \min(n_{\text{train}} - 2, 50) = 50$) before fitting `MASS::lda()`. This preserves the linear discriminant framework while yielding a stable estimate (James et al., *Introduction to Statistical Learning*).
+
+```{r task1-prep-helper}
+prep_pca_lda <- function(train_df, test_df, pred_cols, ncomp = 50L) {
+  x_tr <- scale(train_df[, pred_cols])
+  x_te <- scale(test_df[, pred_cols],
+                center = attr(x_tr, "scaled:center"),
+                scale  = attr(x_tr, "scaled:scale"))
+  pca  <- prcomp(x_tr, center = FALSE, scale. = FALSE)
+  k    <- min(ncomp, ncol(pca$x))
+  list(
+    train_x = pca$x[, seq_len(k), drop = FALSE],
+    test_x  = predict(pca, newdata = x_te)[, seq_len(k), drop = FALSE],
+    ncomp   = k
+  )
+}
+```
+
+## Methods
+
+| Technique | R implementation | Role |
+|-----------|------------------|------|
+| Bayesian linear discriminant analysis | `MASS::lda()` on PCA scores | Linear boundaries under multivariate Normal assumptions |
+| Support vector machines | `e1071::svm()` (radial kernel, `probability = TRUE`) | Flexible boundary via kernel |
+| Classification tree | `rpart::rpart()` | Recursive partitioning; handles many predictors directly |
+
+```{r task1-helpers}
+class_metrics <- function(obs, pred, positive = "Class1") {
+  obs  <- factor(obs, levels = c("Class0", "Class1"))
+  pred <- factor(pred, levels = c("Class0", "Class1"))
+  cm   <- caret::confusionMatrix(pred, obs, positive = positive)
+  data.frame(
+    Accuracy    = as.numeric(cm$overall["Accuracy"]),
+    Kappa       = as.numeric(cm$overall["Kappa"]),
+    Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+    Specificity = as.numeric(cm$byClass["Specificity"])
+  )
+}
+
+fit_q1_models <- function(train_df, test_df, pred_cols) {
+  form_tree <- as.formula(paste("Y ~", paste(pred_cols, collapse = " + ")))
+
+  pca_lda <- prep_pca_lda(train_df, test_df, pred_cols)
+  fit_lda <- lda(pca_lda$train_x, grouping = train_df$Y)
+  pred_lda_tr <- predict(fit_lda, pca_lda$train_x)$class
+  pred_lda_te <- predict(fit_lda, pca_lda$test_x)$class
+
+  fit_svm <- svm(
+    Y ~ .,
+    data = train_df[, c("Y", pred_cols)],
+    kernel = "radial",
+    probability = TRUE,
+    scale = TRUE
+  )
+  pred_svm_tr <- predict(fit_svm, train_df)
+  pred_svm_te <- predict(fit_svm, test_df)
+
+  fit_tree <- rpart(
+    form_tree,
+    data = train_df,
+    method = "class",
+    control = rpart.control(cp = 0.01)
+  )
+  pred_tree_tr <- predict(fit_tree, train_df, type = "class")
+  pred_tree_te <- predict(fit_tree, test_df,  type = "class")
+
+  list(
+    lda  = list(fit = fit_lda,  pred_tr = pred_lda_tr,  pred_te = pred_lda_te,  pca_k = pca_lda$ncomp),
+    svm  = list(fit = fit_svm,  pred_tr = pred_svm_tr,  pred_te = pred_svm_te),
+    tree = list(fit = fit_tree, pred_tr = pred_tree_tr, pred_te = pred_tree_te)
+  )
+}
+```
+
+## Task 1A — Performance on the training data
+
+```{r task1-train}
+models_q1 <- fit_q1_models(train_q1, test_q1, pred_cols_q1)
+
+metrics_q1_train <- rbind(
+  cbind(Model = "Bayesian LDA (PCA + lda)", class_metrics(train_q1$Y, models_q1$lda$pred_tr)),
+  cbind(Model = "Support Vector Machine",   class_metrics(train_q1$Y, models_q1$svm$pred_tr)),
+  cbind(Model = "Classification Tree",    class_metrics(train_q1$Y, models_q1$tree$pred_tr))
+)
+
+knitr::kable(
+  round(metrics_q1_train, 4),
+  caption = "Task 1A: Classification performance on the **training** set (n = 70)."
+)
+```
+
+Confusion matrices (training):
+
+```{r task1-train-cm}
+cat("\n--- LDA ---\n"); print(table(Predicted = models_q1$lda$pred_tr,  Observed = train_q1$Y))
+cat("\n--- SVM ---\n"); print(table(Predicted = models_q1$svm$pred_tr,  Observed = train_q1$Y))
+cat("\n--- Tree ---\n"); print(table(Predicted = models_q1$tree$pred_tr, Observed = train_q1$Y))
+```
+
+## Task 1B — Performance on the test data
+
+```{r task1-test}
+metrics_q1_test <- rbind(
+  cbind(Model = "Bayesian LDA (PCA + lda)", class_metrics(test_q1$Y, models_q1$lda$pred_te)),
+  cbind(Model = "Support Vector Machine",   class_metrics(test_q1$Y, models_q1$svm$pred_te)),
+  cbind(Model = "Classification Tree",    class_metrics(test_q1$Y, models_q1$tree$pred_te))
+)
+
+knitr::kable(
+  round(metrics_q1_test, 4),
+  caption = "Task 1B: Classification performance on the **test** set (n = 30)."
+)
+```
+
+```{r task1-test-cm}
+cat("\n--- LDA ---\n"); print(table(Predicted = models_q1$lda$pred_te,  Observed = test_q1$Y))
+cat("\n--- SVM ---\n"); print(table(Predicted = models_q1$svm$pred_te,  Observed = test_q1$Y))
+cat("\n--- Tree ---\n"); print(table(Predicted = models_q1$tree$pred_te, Observed = test_q1$Y))
+```
+
+## Task 1C — Preferred model and justification
+
+```{r task1-preference, echo=FALSE, results='asis'}
+best_test <- metrics_q1_test[which.max(metrics_q1_test$Accuracy), ]
+ranked <- metrics_q1_test[order(-metrics_q1_test$Accuracy), ]
+```
+
+On the held-out test set ($n = 30$), **`r best_test$Model`** attains the highest **accuracy** (`r round(best_test$Accuracy, 3)`), with Cohen's $\kappa$ = `r round(best_test$Kappa, 3)`, sensitivity = `r round(best_test$Sensitivity, 3)`, and specificity = `r round(best_test$Specificity, 3)`. Ranking by test accuracy: `r paste(sprintf("%s (%.3f)", ranked$Model, ranked$Accuracy), collapse = "; ")`.
+
+I prefer **`r best_test$Model`** because test performance—not training fit—determines generalisation. Among the alternatives, the support vector machine can capture nonlinear structure in high dimensions but offers limited interpretability; the classification tree is easy to explain yet may partition noise when the tree is deep; Bayesian LDA (with PCA where $p > n$) provides linear decision boundaries and class probabilities but may underfit if the true boundary is strongly nonlinear. The chosen model balances test accuracy with stable behaviour on this split.
+
+```{r task1-plot, fig.cap="Test-set accuracy across the three classifiers (Task 1)."}
+ggplot(metrics_q1_test, aes(x = reorder(Model, Accuracy), y = Accuracy)) +
+  geom_col(fill = "steelblue", width = 0.65) +
+  geom_text(aes(label = sprintf("%.3f", Accuracy)), vjust = -0.4, size = 3.5) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(x = NULL, y = "Accuracy", title = "Task 1: Test performance") +
+  theme_minimal()
+```
+
+---
+
+# Task 2 — Regression (`my_dataQ2.csv`)
+
+## Data description and train–test split
+
+The data contain **50 observations**, **28 predictors** (`x1`–`x28`), and a continuous response **`y`** in the last column.
+
+```{r task2-load}
+data_q2 <- read.csv("my_dataQ2.csv", check.names = FALSE)
+n_q2 <- nrow(data_q2)
+stopifnot(n_q2 == 50L, ncol(data_q2) == 29L)
+
+set.seed(20261)
+p_train <- 0.80
+idx_train_q2 <- sample(seq_len(n_q2), size = floor(p_train * n_q2), replace = FALSE)
+idx_test_q2  <- setdiff(seq_len(n_q2), idx_train_q2)
+
+train_q2 <- data_q2[idx_train_q2, ]
+test_q2  <- data_q2[idx_test_q2, ]
+
+pred_cols_q2 <- setdiff(names(data_q2), "y")
+
+cat("Training cases:", nrow(train_q2), "| Test cases:", nrow(test_q2), "\n")
+```
+
+## Methods
+
+| Technique | R implementation | Notes |
+|-----------|------------------|-------|
+| Stepwise regression | `step()` on full main-effects model (`direction = "both"`) | AIC-based subset selection |
+| Ridge regression | `glmnet(..., alpha = 0)` | L2 penalty; $\lambda$ by 10-fold CV on training |
+| Lasso | `glmnet(..., alpha = 1)` | L1 penalty; variable selection + shrinkage |
+
+```{r task2-helpers}
+reg_metrics <- function(obs, pred) {
+  err <- obs - pred
+  data.frame(
+    RMSE = sqrt(mean(err^2)),
+    MAE  = mean(abs(err)),
+    Rsq  = 1 - sum(err^2) / sum((obs - mean(obs))^2)
+  )
+}
+
+fit_q2_models <- function(train_df, test_df, pred_cols) {
+  form <- as.formula(paste("y ~", paste(pred_cols, collapse = " + ")))
+
+  full_lm <- lm(form, data = train_df)
+  fit_step <- step(full_lm, direction = "both", trace = 0)
+
+  x_tr <- as.matrix(train_df[, pred_cols])
+  x_te <- as.matrix(test_df[, pred_cols])
+  y_tr <- train_df$y
+  y_te <- test_df$y
+
+  cv_ridge <- cv.glmnet(x_tr, y_tr, alpha = 0, nfolds = 10)
+  cv_lasso <- cv.glmnet(x_tr, y_tr, alpha = 1, nfolds = 10)
+
+  pred_step_tr <- predict(fit_step, train_df)
+  pred_step_te <- predict(fit_step, test_df)
+  pred_ridge_tr <- as.numeric(predict(cv_ridge, x_tr, s = "lambda.min"))
+  pred_ridge_te <- as.numeric(predict(cv_ridge, x_te, s = "lambda.min"))
+  pred_lasso_tr <- as.numeric(predict(cv_lasso, x_tr, s = "lambda.min"))
+  pred_lasso_te <- as.numeric(predict(cv_lasso, x_te, s = "lambda.min"))
+
+  list(
+    step  = list(fit = fit_step,  pred_tr = pred_step_tr,  pred_te = pred_step_te),
+    ridge = list(fit = cv_ridge, pred_tr = pred_ridge_tr, pred_te = pred_ridge_te),
+    lasso = list(fit = cv_lasso, pred_tr = pred_lasso_tr, pred_te = pred_lasso_te)
+  )
+}
+```
+
+## Task 2A — Performance on the training data
+
+```{r task2-train}
+models_q2 <- fit_q2_models(train_q2, test_q2, pred_cols_q2)
+
+metrics_q2_train <- rbind(
+  cbind(Model = "Stepwise regression", reg_metrics(train_q2$y, models_q2$step$pred_tr)),
+  cbind(Model = "Ridge regression",    reg_metrics(train_q2$y, models_q2$ridge$pred_tr)),
+  cbind(Model = "Lasso",               reg_metrics(train_q2$y, models_q2$lasso$pred_tr))
+)
+
+knitr::kable(
+  round(metrics_q2_train, 4),
+  caption = "Task 2A: Regression performance on the **training** set."
+)
+```
+
+Stepwise selected model formula:
+
+```{r task2-step-formula}
+print(formula(models_q2$step$fit))
+```
+
+## Task 2B — Performance on the test data
+
+```{r task2-test}
+metrics_q2_test <- rbind(
+  cbind(Model = "Stepwise regression", reg_metrics(test_q2$y, models_q2$step$pred_te)),
+  cbind(Model = "Ridge regression",    reg_metrics(test_q2$y, models_q2$ridge$pred_te)),
+  cbind(Model = "Lasso",               reg_metrics(test_q2$y, models_q2$lasso$pred_te))
+)
+
+knitr::kable(
+  round(metrics_q2_test, 4),
+  caption = "Task 2B: Regression performance on the **test** set."
+)
+```
+
+```{r task2-test-plot, fig.cap="Observed vs predicted on the test set (Task 2)."}
+plot_q2 <- data.frame(
+  observed = test_q2$y,
+  step  = models_q2$step$pred_te,
+  ridge = models_q2$ridge$pred_te,
+  lasso = models_q2$lasso$pred_te
+)
+long_q2 <- rbind(
+  data.frame(observed = plot_q2$observed, predicted = plot_q2$step,  Model = "Stepwise"),
+  data.frame(observed = plot_q2$observed, predicted = plot_q2$ridge, Model = "Ridge"),
+  data.frame(observed = plot_q2$observed, predicted = plot_q2$lasso, Model = "Lasso")
+)
+ggplot(long_q2, aes(x = observed, y = predicted)) +
+  geom_point(alpha = 0.85) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray40") +
+  facet_wrap(~ Model) +
+  labs(x = "Observed y", y = "Predicted y", title = "Task 2: Test-set calibration") +
+  theme_minimal()
+```
+
+## Task 2C — Preferred model and justification
+
+```{r task2-preference, echo=FALSE, results='asis'}
+best_rmse <- metrics_q2_test[which.min(metrics_q2_test$RMSE), ]
+ranked_rmse <- metrics_q2_test[order(metrics_q2_test$RMSE), ]
+```
+
+On the test set, **`r best_rmse$Model`** minimises **RMSE** (`r round(best_rmse$RMSE, 3)`; test $R^2$ = `r round(best_rmse$Rsq, 3)`, MAE = `r round(best_rmse$MAE, 3)`). Test RMSE ranking: `r paste(sprintf("%s (%.3f)", ranked_rmse$Model, ranked_rmse$RMSE), collapse = "; ")`.
+
+I prefer **`r best_rmse$Model`** for prediction on new observations. Stepwise regression is transparent (see selected terms above) but can overfit the training sample; ridge regression reduces variance when predictors are correlated; lasso performs continuous shrinkage and optional variable selection. The final choice is based on **lowest test RMSE**, which penalises both bias and variance on data not used to fit the model.
+
+```{r task2-rmse-plot, fig.cap="Test-set RMSE for the three regression methods (Task 2)."}
+ggplot(metrics_q2_test, aes(x = reorder(Model, -RMSE), y = RMSE)) +
+  geom_col(fill = "darkorange", width = 0.65) +
+  geom_text(aes(label = sprintf("%.3f", RMSE)), vjust = -0.4, size = 3.5) +
+  labs(x = NULL, y = "RMSE (lower is better)", title = "Task 2: Test performance") +
+  theme_minimal()
+```
+
+---
+
+# Session information
+
+```{r session}
+sessionInfo()
+```
